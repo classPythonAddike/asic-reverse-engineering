@@ -1,1 +1,2 @@
 pydantic == 2.9.*
+lefdef==0.6.0
