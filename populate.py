@@ -1,22 +1,39 @@
+import os
 import sys
 import gdstk
+import logging
 
-from parse_lef import parse_lef_pins
-from schema import DB, STDCell, Polygon, Coordinate, Via
+from parse_lef import parse_and_insert_lef_pins
+
+from schema import initialize_db
+from schema import DBMetadata, STDCell, Polygon, Via
 from schema import LAYER_MAP, MET_DATATYPE, VIA_DATATYPE
 
 
-output_json = sys.argv[1]
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    datefmt="%H:%M:%S",
+)
+
+output_db_path = sys.argv[1]
 gds_file = sys.argv[2]
 
-db = DB(std_cells={}, polygons=[], vias=[], units=1e-9)
+if os.path.exists(output_db_path):
+    os.remove(output_db_path)
+
+logging.info(f"Initializing DB: {output_db_path}")
+db = initialize_db(output_db_path)
+
+with db.atomic():
+    DBMetadata.create(units=1e-9)
 
 library = gdstk.read_gds(gds_file, 1e-9)
 top_cell = library.top_level()[0]
 
 
 def process_polygon(poly):
-    """Processes and appends a polygon to db.polygons or db.vias if valid."""
+    """Processes and inserts a polygon or via directly into the database."""
     if poly.layer not in LAYER_MAP:
         return
 
@@ -25,76 +42,90 @@ def process_polygon(poly):
         return
 
     (min_x, min_y), (max_x, max_y) = bbox
-    bl = Coordinate(x=int(min_x), y=int(min_y))
-    tr = Coordinate(x=int(max_x), y=int(max_y))
+    bl_x, bl_y = int(min_x), int(min_y)
+    tr_x, tr_y = int(max_x), int(max_y)
 
     if poly.datatype == MET_DATATYPE:
         met_name = LAYER_MAP[poly.layer].get("MET")
         if met_name:
-            db_poly = Polygon(
-                bottom_left=bl,
-                top_right=tr,
+            Polygon.create(
+                bl_x=bl_x,
+                bl_y=bl_y,
+                tr_x=tr_x,
+                tr_y=tr_y,
                 layer=met_name,
                 net="",
             )
-            db.polygons.append(db_poly)
 
     elif poly.datatype == VIA_DATATYPE:
         via_name = LAYER_MAP[poly.layer].get("VIA")
         if via_name:
-            center = (bl + tr) // 2
-            db_via = Via(
-                center=center,
+            center_x = (bl_x + tr_x) // 2
+            center_y = (bl_y + tr_y) // 2
+            Via.create(
+                center_x=center_x,
+                center_y=center_y,
                 layer=via_name,
                 net="",
             )
-            db.vias.append(db_via)
 
 
-# 1. Process top-level loose polygons and vias
-for poly in top_cell.polygons:
+total_count = len(top_cell.polygons)
+logging.info(f"Starting polygon processing. Total: {total_count}")
+for count, poly in enumerate(top_cell.polygons, 1):
     process_polygon(poly)
+    if count % (total_count // 10) == 0:
+        logging.info(f"Processed {count} / {total_count} top-level polygons")
+logging.info(f"Finished polygon processing.")
 
-# 2. Iterate through top-level references
+total_count = len(top_cell.references)
+logging.info(f"Starting std cell processing. Total: {total_count}")
 for i, ref in enumerate(top_cell.references):
     cell_name = ref.cell.name
 
-    # Include via cell instances for inter-cell routing
     if (
         "via" in cell_name.lower()
         or "mcon" in cell_name.lower()
         or "licon" in cell_name.lower()
     ):
-        for poly in ref.get_polygons(include_paths=True):
-            process_polygon(poly)
-    # Populate std_cells for cells starting with sky130_fd
+        with db.atomic():
+            for poly in ref.get_polygons(include_paths=True):
+                process_polygon(poly)
+
     elif cell_name.startswith("sky130"):
         bbox = ref.bounding_box()
         if bbox is not None:
             min_x, min_y = bbox[0]
-            loc = Coordinate(x=int(min_x), y=int(min_y))
+            loc_x, loc_y = int(min_x), int(min_y)
         else:
-            loc = Coordinate(x=int(ref.origin[0]), y=int(ref.origin[1]))
+            loc_x, loc_y = int(ref.origin[0]), int(ref.origin[1])
 
-        # Unique key for std_cells dictionary (instance name)
         inst_name = f"{cell_name}_{i}"
 
-        pins = parse_lef_pins(cell_name)
+        with db.atomic():
+            cell_record = STDCell.create(
+                name=inst_name,
+                cell_type=cell_name,
+                loc_x=loc_x,
+                loc_y=loc_y,
+                num_pins=0,
+            )
 
-        std_cell = STDCell(
-            name=inst_name,
-            cell_type=cell_name,
-            pins=pins,
-            loc=loc,
-            num_pins=0,
-        )
-        db.std_cells[inst_name] = std_cell
+            num_pins = parse_and_insert_lef_pins(cell_record)
+            cell_record.num_pins = num_pins
+            cell_record.save()
+
     else:
-        print("Ignoring cell:", cell_name)
+        logging.warning(f"Ignoring cell: {cell_name}")
 
-print("Number of standard cells:", len(db.std_cells))
-print("Number of polygons:", len(db.polygons))
-print("Number of vias:", len(db.vias))
+    if (i + 1) % (total_count // 10) == 0:
+        logging.info(f"Processed {i} / {total_count} std cells")
 
-with open(output_json, "w") as f:
-    f.write(db.model_dump_json(indent=4))
+logging.info(f"Finished std cell processing.")
+
+logging.info("Database population complete!")
+logging.info(f"Standard Cells: {STDCell.select().count()}")
+logging.info(f"Polygons: {Polygon.select().count()}")
+logging.info(f"Vias: {Via.select().count()}")
+
+db.close()

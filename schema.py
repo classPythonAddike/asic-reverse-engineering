@@ -1,7 +1,4 @@
-import pydantic
-from pydantic import BaseModel
-
-from typing import List, Dict
+import peewee
 
 # Map SkyWater 130 GDS layer numbers to metal layer names
 LAYER_MAP = {
@@ -17,45 +14,59 @@ LAYER_MAP = {
 MET_DATATYPE = 20
 VIA_DATATYPE = 44
 
-class Coordinate(BaseModel):
-    x: int
-    y: int
+db_proxy = peewee.DatabaseProxy()
 
-    def __add__(self, other):
-        return Coordinate(x=(self.x + other.x), y=(self.y + other.y))
 
-    def __sub__(self, other):
-        return Coordinate(x=(self.x - other.x), y=(self.y - other.y))
+class BaseModel(peewee.Model):
+    class Meta:
+        database = db_proxy
 
-    def __floordiv__(self, other):
-        return Coordinate(x=self.x // other, y=self.y // other)
 
-class Pin(BaseModel):
-    name: str
-    centers: List[Coordinate] # Relative to the bottom-left coordinate of the cell
-    net: str
+class DBMetadata(BaseModel):
+    units = peewee.FloatField(default=1e-9)
+
 
 class STDCell(BaseModel):
-    name: str
-    cell_type: str
-    pins: Dict[str, Pin] # name: Pin()
-    loc: Coordinate # Bottom-left coordinate
-    num_pins: int
+    name = peewee.CharField(unique=True)  # Instance name (e.g., cell_name_0)
+    cell_type = peewee.CharField()
+    loc_x = peewee.IntegerField()
+    loc_y = peewee.IntegerField()
+    num_pins = peewee.IntegerField(default=0)
+
+
+class Pin(BaseModel):
+    std_cell = peewee.ForeignKeyField(STDCell, backref="pins", on_delete="CASCADE")
+    name = peewee.CharField()
+    net = peewee.CharField(default="")
+
+
+class PinCenter(BaseModel):
+    pin = peewee.ForeignKeyField(Pin, backref="centers", on_delete="CASCADE")
+    x = peewee.IntegerField()
+    y = peewee.IntegerField()
+
 
 class Polygon(BaseModel):
-    bottom_left: Coordinate
-    top_right: Coordinate
-    layer: str
-    net: str
+    bl_x = peewee.IntegerField()
+    bl_y = peewee.IntegerField()
+    tr_x = peewee.IntegerField()
+    tr_y = peewee.IntegerField()
+    layer = peewee.CharField()
+    net = peewee.CharField(default="")
+
 
 class Via(BaseModel):
-    center: Coordinate
-    layer: str
-    net: str
+    center_x = peewee.IntegerField()
+    center_y = peewee.IntegerField()
+    layer = peewee.CharField()
+    net = peewee.CharField(default="")
 
-class DB(BaseModel):
-    units: float # DB units
-    std_cells: Dict[str, STDCell] # name: Cell()
-    polygons: List[Polygon]
-    vias: List[Via]
 
+def initialize_db(db_path: str):
+    database = peewee.SqliteDatabase(db_path)
+    db_proxy.initialize(database)
+    database.connect()
+    database.create_tables(
+        [DBMetadata, STDCell, Pin, PinCenter, Polygon, Via], safe=True
+    )
+    return database

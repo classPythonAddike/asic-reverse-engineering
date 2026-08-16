@@ -1,12 +1,22 @@
 import os
 import sys
+import logging
 
 from lefdef import C_LefReader
+from schema import STDCell, Pin, PinCenter
 
-from schema import Coordinate, Pin
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    datefmt="%H:%M:%S",
+)
 
-
-def parse_lef_pins(cell_name: str) -> dict[str, Pin]:
+def parse_and_insert_lef_pins(cell_record: STDCell) -> int:
+    """
+    Parses LEF geometry for a cell and creates Pin and PinCenter records directly in the DB.
+    Returns the count of pins inserted.
+    """
+    cell_name = cell_record.cell_type
     pdk_root = os.environ.get("PDK_ROOT", "/usr/local/share/pdk")
     pdk = os.environ.get("PDK", "sky130A")
 
@@ -19,11 +29,9 @@ def parse_lef_pins(cell_name: str) -> dict[str, Pin]:
     if not os.path.exists(lef_path):
         raise FileNotFoundError(f"LEF file not found at: {lef_path}")
 
-    # Initialize and read the LEF file
     reader = C_LefReader()
     lef = reader.read(lef_path)
 
-    # Locate the macro matching cell_name
     target_macro = None
     for i in range(lef.c_num_macros):
         if lef.c_macros[i].c_name.decode() == cell_name:
@@ -31,43 +39,37 @@ def parse_lef_pins(cell_name: str) -> dict[str, Pin]:
             break
 
     if not target_macro:
-        print(f"Cell '{cell_name}' not found in {lef_path}")
-        return {}
+        logging.warning(f"Cell '{cell_name}' not found in {lef_path}")
+        return 0
 
-    pins: dict[str, Pin] = {}
+    pin_count = target_macro.c_num_pins
 
-    # Iterate through macro pins
-    for j in range(target_macro.c_num_pins):
+    for j in range(pin_count):
         pin_obj = target_macro.c_pins[j]
         pin_name = pin_obj.c_name
 
-        centers = []
+        pin_record = Pin.create(
+            std_cell=cell_record,
+            name=pin_name,
+            net="",
+        )
 
-        # Iterate over pin ports and their geometry rectangles
+        centers_to_insert = []
+
         for p in range(pin_obj.c_num_ports):
             port = pin_obj.c_ports[p]
             for r in range(port.c_num_rects):
                 rect = port.c_rects[r]
-                # Calculate rectangle center
                 cx = (rect.c_xl + rect.c_xh) / 2.0
                 cy = (rect.c_yl + rect.c_yh) / 2.0
-                centers.append(Coordinate(x=int(cx * 1000), y=int(cy * 1000)))
 
-        pins[pin_name] = Pin(
-            name=pin_name,
-            centers=centers,
-            net="",
-        )
+                centers_to_insert.append({
+                    "pin": pin_record,
+                    "x": int(cx * 1000),
+                    "y": int(cy * 1000),
+                })
 
-    return pins
+        if centers_to_insert:
+            PinCenter.insert_many(centers_to_insert).execute()
 
-
-if __name__ == "__main__":
-    target_cell = sys.argv[1]
-    extracted_pins = parse_lef_pins(target_cell)
-
-    print(f"Found {len(extracted_pins)} pins for {target_cell}:")
-    for name, pin_data in extracted_pins.items():
-        print(
-            f"  - Pin '{name}': Center(s) = ({pin_data.centers})"
-        )
+    return pin_count
