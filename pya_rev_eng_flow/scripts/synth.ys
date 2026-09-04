@@ -1,0 +1,9 @@
+read_liberty -lib sky130_fd_sc_hd__tt_025C_1v80.lib
+read_verilog puzzle_fixed/resynth.v
+hierarchy -check -top puzzle
+flatten
+techmap
+opt
+abc -liberty sky130_fd_sc_hd__tt_025C_1v80.lib
+opt_clean -purge
+write_verilog -noattr puzzle_fixed/netlist.v
