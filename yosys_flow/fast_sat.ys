@@ -1,0 +1,15 @@
+# ==========================================
+# PHASE 1: Run Setup and Compilation ONCE
+# ==========================================
+read_verilog generated_module.v
+hierarchy -top logic_module
+proc; async2sync; techmap; opt;
+
+# Save this optimized base design into an in-memory backup slot named 'compiled_base'
+design -copy-to compiled_base
+
+# ==========================================
+# PHASE 2: Efficient In-Memory SAT Loop
+# ==========================================
+# We switch to Tcl mode inside Yosys to handle the loop logic efficiently
+tcl flow.tcl

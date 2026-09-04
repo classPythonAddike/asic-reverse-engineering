@@ -1,0 +1,21 @@
+# 1. Read the generated Verilog file
+read_verilog generated_module.v
+
+# 2. Elaborate design hierarchy
+hierarchy -top logic_module
+
+# 3. Process flip-flops and logic blocks
+proc
+
+# 4. Convert async flip-flops to sync flip-flops
+async2sync
+
+# 5. Map high-level DFF cells to internal primitives
+techmap
+
+# 6. Optimize design
+opt
+
+# 7. Step-by-step unrolling up to 300 cycles. 
+# It terminates and prints the trace the first time 'success' hits 1.
+sat -tempinduct-baseonly -maxsteps 300 -set-at-max success 1 -show-public
